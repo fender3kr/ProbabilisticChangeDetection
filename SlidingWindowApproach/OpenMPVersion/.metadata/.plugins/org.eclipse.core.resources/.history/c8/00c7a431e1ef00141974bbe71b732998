@@ -1,0 +1,206 @@
+/*
+ * app.c
+ *
+ *  Created on: Feb 27, 2015
+ *  Author: Seokyong Hong
+ */
+
+#include "shong3/app.h"
+
+int compute_kld_size(int width, int height, int top_margin, int left_margin, int bottom_margin, int right_margin) {
+	return (width - left_margin - right_margin) * (height - top_margin - bottom_margin);
+}
+
+int clustering_init(void) {
+	return 1;
+}
+
+int clustering_close(_clusters *clusters) {
+	if(clusters -> gmm)
+		vl_gmm_delete(clusters -> gmm);
+
+	return 1;
+}
+
+int clustering_perform(_clusters *clusters, double *data, int size, int dimension, int from, int to) {
+	int index;
+	double loglikelihood;
+	VlGMM *gmm;
+
+	if(from > to) {
+		fprintf(stderr, "Cannot perform clustering.\n");
+		return 0;
+	}
+
+	for(index = from;index <= to;index++) {
+		gmm = vl_gmm_new(VL_TYPE_DOUBLE, dimension, index);
+		vl_gmm_set_max_num_iterations(gmm, MAX_ITERATION);
+		vl_gmm_set_num_repetitions(gmm, 3);
+		vl_set_num_threads(NUMBER_THREADS);
+		vl_gmm_set_initialization(gmm, VlGMMRand);
+		vl_gmm_cluster(gmm, data, size);
+		loglikelihood = vl_gmm_get_loglikelihood(gmm);
+
+		if(index == from) {
+			clusters -> loglikelihood = loglikelihood;
+			clusters -> gmm = gmm;
+			clusters -> G = index;
+			continue;
+		}
+
+		if(loglikelihood > clusters -> loglikelihood) {
+			clusters -> loglikelihood = loglikelihood;
+			if(!clusters -> gmm)
+				vl_gmm_delete(clusters -> gmm);
+
+			clusters -> gmm = gmm;
+			clusters -> G = index;
+		}
+		else {
+			vl_gmm_delete(gmm);
+		}
+	}
+	printf("G: %d L: %f\n", clusters -> G, clusters -> loglikelihood);
+
+	return 1;
+}
+
+int save_clusters(_clusters *clusters, double *klds, int top, int left, int bottom, int right, image_handle *image1, image_handle *image2) {
+	const double *posteriors;
+	const double *means;
+	const double *sigmas;
+	int index, clust, max_index, kld_size;
+	double max;
+	int i, j, width, height;
+	int percent = 10;
+	IplImage *cvImage1, *cvImage2, *resizedImage;
+	CvSize size;
+	unsigned char *cluster_map;
+	unsigned char *image = return_display_image(image2);
+
+
+	if(!klds || !clusters -> gmm) {
+		fprintf(stderr, "Cannot store clustering result.\n");
+		return 0;
+	}
+
+	cluster_map = (unsigned char *)malloc(3 * image1 -> width * image2 -> height * sizeof(unsigned char));
+	memset(cluster_map, 0, 3 * image1 -> width * image2 -> height * sizeof(unsigned char));
+	posteriors = (double *)vl_gmm_get_posteriors(clusters -> gmm);
+	means = (double *)vl_gmm_get_means(clusters -> gmm);
+	sigmas = (double *)vl_gmm_get_covariances(clusters -> gmm) ;
+	for(index = 0;index < clusters -> G;index++) {
+		for(i = 0;i < vl_gmm_get_dimension(clusters -> gmm);i++) {
+			printf("M: %f ", ((double *)means)[index * vl_gmm_get_dimension(clusters -> gmm) + i]);
+		}
+		for(i = 0;i < vl_gmm_get_dimension(clusters -> gmm);i++) {
+			printf("S: %f ", ((double *)sigmas)[index * vl_gmm_get_dimension(clusters -> gmm) + i]);
+		}
+		printf("\n");
+	}
+
+	kld_size = compute_kld_size(image1 -> width, image1 -> height, top, left, bottom, right);
+	for(index = 0;index < kld_size;index++) {
+		unsigned char bgr[3];
+
+		max = posteriors[index * clusters -> G];
+		max_index = 0;
+		for(clust = 1;clust < clusters -> G;clust++) {
+			if(posteriors[index * clusters -> G + clust] > max) {
+				max = posteriors[index * clusters -> G + clust];
+				max_index = clust;
+			}
+		}
+
+		switch(max_index) {
+		case 0:
+			bgr[0] = 0x00;
+			bgr[1] = 0x00;
+			bgr[2] = 0xFF;
+			break;
+		case 1:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 2:
+			bgr[0] = 0x00;
+			bgr[1] = 0xFF;
+			bgr[2] = 0x00;
+			break;
+		case 3:
+			bgr[0] = 0xFF;
+			bgr[1] = 0xFF;
+			bgr[2] = 0x00;
+			break;
+		case 4:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0xFF;
+			break;
+		case 5:
+			bgr[0] = 0x33;
+			bgr[1] = 0x77;
+			bgr[2] = 0x88;
+			break;
+		case 6:
+			bgr[0] = 0x66;
+			bgr[1] = 0x55;
+			bgr[2] = 0x33;
+			break;
+		case 7:
+			bgr[0] = 0x55;
+			bgr[1] = 0x11;
+			bgr[2] = 0x99;
+			break;
+		}
+
+		width = image1 -> width - left - right;
+		height = image1 -> height - top - bottom;
+		i = (index % width + left) * 3;
+		j = (index / width + top) * image1 -> width * 3;
+		memcpy(cluster_map + i + j, bgr, 3);
+	}
+
+	size.height = image1 -> height;
+	size.width = image1 -> width;
+	cvImage1 = cvCreateImage(size, 8, image2 -> band);
+	cvImage2 = cvCreateImage(size, 8, image2 -> band);
+	memcpy(cvImage1 -> imageData, image, image2 -> width * image2 -> height * image2 -> band);
+	memcpy(cvImage2 -> imageData, cluster_map, image2 -> width * image2 -> height * image2 -> band);
+
+	//cvAdd(cvImage1, cvImage2, cvImage1, NULL);
+	//cvAddWeighted(cvImage1, 1.0, cvImage2, 0.4, 0, cvImage1);
+	cvAddWeighted(cvImage1, 0, cvImage2, 1, 0, cvImage1);
+	resizedImage = cvCreateImage(cvSize((int)((cvImage1 -> width * percent) / 100) , (int)((cvImage1 -> height * percent) / 100) ), cvImage1 -> depth, cvImage1 -> nChannels);
+	cvResize(cvImage1, resizedImage, CV_INTER_LINEAR);
+	cvNamedWindow("Change Detection Result", 1);
+	cvShowImage("Change Detection Result", resizedImage);
+	cvWaitKey(0);
+	cvDestroyWindow("Change Detection Result");
+
+	cvReleaseImage(&cvImage1);
+	cvReleaseImage(&cvImage2);
+	cvReleaseImage(&resizedImage);
+
+	free(image);
+	free(cluster_map);
+	return 1;
+}
+
+void add_random_pixels(float *image1, float *image2, int band, int width, int height, float percentage) {
+	int image_size = width * height;
+	int pixels = (int)(image_size * percentage);
+	int i, j;
+
+	for(i = 0;i < pixels;i++) {
+		int random_position1 = rand() % image_size;
+		int random_position2 = rand() % image_size;
+
+		for(j = 0;j < band;j++) {
+			*(image1 + random_position1 + image_size * j) = (float)(rand() % 256);
+			*(image2 + random_position2 + image_size * j) = (float)(rand() % 256);
+		}
+	}
+}
+

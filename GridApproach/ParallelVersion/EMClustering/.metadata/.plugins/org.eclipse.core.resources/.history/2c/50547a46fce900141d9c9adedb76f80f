@@ -1,0 +1,107 @@
+/*
+ * main.c
+ *
+ *  Created on: Feb 27, 2015
+ *  Author: Seokyong Hong
+ */
+
+#include <omp.h>
+#include <stdio.h>
+#include "shong3/app.h"
+#include "shong3/KLD.h"
+#include "shong3/gaussian.h"
+
+#define IMAGE_T1_PATH	"/home/phantom/Desktop/EMClustering/Image/k02-05m.tif"
+#define IMAGE_T2_PATH	"/home/phantom/Desktop/EMClustering/Image/k12-05m.tif"
+#define GRID_WIDTH		200
+#define GRID_HEIGHT		200
+#define MARGIN_LEFT		460
+#define MARGIN_RIGHT	394
+#define MARGIN_TOP		485
+#define MARGIN_BOTTOM	482
+#define RANDOM_PIXELS	0.1F
+#define NUMBER_THREADS	4
+
+int main(int argc, char *argv[]) {
+	image_handle *image_t1, *image_t2;
+	int grids, index;
+	bounding_box *plan;
+	double *klds;
+	float *grid_t1, *grid_t2;
+	p_gaussian gaussian_t1, gaussian_t2;
+	_clusters clusters;
+
+	GDALAllRegister();
+	clustering_init();
+
+	image_t1 = open_image(IMAGE_T1_PATH);
+	image_t2 = open_image(IMAGE_T2_PATH);
+	if(!image_t1) {
+		fprintf(stderr, "The input image1 cannot be loaded.");
+		return 0;
+	}
+	if(!image_t2) {
+		fprintf(stderr, "The input image2 cannot be loaded.");
+		unload_image(image_t1);
+		return 0;
+	}
+
+	grids = generate_grid_plan(image_t1, GRID_WIDTH, GRID_HEIGHT, &plan, MARGIN_TOP, MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_RIGHT);
+	if(grids < 0) {
+		unload_image(image_t1);
+		unload_image(image_t2);
+		return 0;
+	}
+
+	klds = (double *)malloc(grids * sizeof(double));
+	if(!klds) {
+		fprintf(stderr, "Cannot allocate memory for KLDs.\n");
+		unload_image(image_t1);
+		unload_image(image_t2);
+		free(plan);
+		return 0;
+	}
+
+	load_image(image_t1);
+	load_image(image_t2);
+
+	#pragma omp parallel default(none) shared(stderr, grids, plan, image_t1, image_t2, klds) private(grid_t1, grid_t2, gaussian_t1, gaussian_t2) num_threads(NUMBER_THREADS)
+	{
+		#pragma omp parallel for schedule(static)
+		for(index = 0;index < grids;index++) {
+			grid_t1 = load_grid(image_t1, plan[index]);
+			grid_t2 = load_grid(image_t2, plan[index]);
+			gaussian_t1 = init_gaussian(image_t1 -> band);
+			gaussian_t2 = init_gaussian(image_t2 -> band);
+			compute_gaussian(gaussian_t1, grid_t1, plan[index].width * plan[index].height);
+			compute_gaussian(gaussian_t2, grid_t2, plan[index].width * plan[index].height);
+
+			klds[index] = compute_symmetric_kld(gaussian_t1, gaussian_t2);
+
+			while(isnan(klds[index])) {
+				fprintf(stderr, "Since KLD is NaN, it is recalculated.\n");
+				add_random_pixels(grid_t1, grid_t2, image_t1 -> band, plan[index].width, plan[index].height, RANDOM_PIXELS);
+				compute_gaussian(gaussian_t1, grid_t1, plan[index].width * plan[index].height);
+				compute_gaussian(gaussian_t2, grid_t2, plan[index].width * plan[index].height);
+				klds[index] = compute_symmetric_kld(gaussian_t1, gaussian_t2);
+			}
+
+			free(grid_t1);
+			free(grid_t2);
+			close_gaussian(gaussian_t1);
+			close_gaussian(gaussian_t2);
+		}
+	}
+
+	clustering_perform(&clusters, klds, grids, 1, 1, 7);
+	save_clusters(&clusters, klds, plan, grids, image_t1, image_t2);
+
+	clustering_close(&clusters);
+	free(plan);
+	unload_image(image_t1);
+	unload_image(image_t2);
+
+	return 0;
+}
+
+

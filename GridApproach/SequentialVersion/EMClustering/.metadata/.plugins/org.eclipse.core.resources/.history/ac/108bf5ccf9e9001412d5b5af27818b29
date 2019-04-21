@@ -1,0 +1,337 @@
+/*
+ * app.c
+ *
+ *  Created on: Feb 27, 2015
+ *  Author: Seokyong Hong
+ */
+
+#include "shong3/app.h"
+
+static _clusters clusters;
+
+int generate_grid_plan(image_handle *handle, int width, int height, bounding_box **grids, int top_margin, int left_margin, int bottom_margin, int right_margin) {
+	int rows, cols, total_grids = -1;
+	int i, j;
+	bounding_box *current;
+
+	if(!handle) {
+		fprintf(stderr, "Image handle is NULL.\n");
+		return total_grids;
+	}
+
+	if(width <= 0 || width >= handle -> width * 0.5) {
+		fprintf(stderr, "Grid width is too small or too large.\n");
+		return total_grids;
+	}
+
+	if(height <= 0 || height >= handle -> height * 0.5) {
+		fprintf(stderr, "Grid height is too small or too large.\n");
+		return total_grids;
+	}
+
+	rows = (handle -> height - top_margin - bottom_margin) / height;
+	cols = (handle -> width - left_margin - right_margin) / width;
+	total_grids = rows * cols;
+
+	*grids = (bounding_box *)malloc(total_grids * sizeof(bounding_box));
+	current = *grids;
+
+	for(i = 0;i < rows;i++) {
+		for(j = 0;j < cols;j++) {
+			current -> left = j * width + left_margin;
+			current -> top = i * height + top_margin;
+			current -> width = width;
+			current -> height = height;
+			current++;
+		}
+	}
+
+	return total_grids;
+}
+
+float *flatten(image_handle *handle) {
+	int band, index, length;
+	float *data;
+	float *temp[handle -> band];
+
+	if(!handle) {
+		fprintf(stderr, "Cannot flatten image.\n");
+		return NULL;
+	}
+
+	length = handle -> width * handle -> height * handle -> band * handle -> band * sizeof(float);
+	data = vl_malloc(length);
+	if(!data) {
+		fprintf(stderr, "Cannot allocate memory for flattened image.\n");
+		return NULL;
+	}
+
+	for(band = 0;band < handle -> band;band++) {
+		temp[band] = (float *)CPLMalloc(sizeof(float) * handle -> width * handle -> height);
+		GDALRasterBandH p_band = GDALGetRasterBand(handle -> dataset, band + 1);
+		GDALRasterIO(p_band, GF_Read, 0, 0, handle -> width, handle -> height, temp[band], handle -> width, handle -> height, GDT_Float32, 0, 0);
+	}
+
+	for(index = 0;index < handle -> width * handle -> height;index++) {
+		for(band = 0;band < handle -> band;band++) {
+			data[index * handle -> band + band] = temp[band][index];
+		}
+	}
+
+	for(band = 0;band < handle -> band;band++) {
+		CPLFree(temp[band]);
+	}
+
+	return data;
+}
+
+float *extract_image(image_handle *handle) {
+	int band, length;
+	float *data;
+
+	if(!handle) {
+		fprintf(stderr, "Cannot flatten image.\n");
+		return NULL;
+	}
+
+	length = handle -> width * handle -> height * handle -> band * handle -> band * sizeof(float);
+	data = vl_malloc(length);
+	if(!data) {
+		fprintf(stderr, "Cannot allocate memory for flattened image.\n");
+		return NULL;
+	}
+
+	for(band = 0;band < handle -> band;band++) {
+		GDALRasterBandH p_band = GDALGetRasterBand(handle -> dataset, band + 1);
+		GDALRasterIO(p_band, GF_Read, 0, 0, handle -> width, handle -> height, data + handle -> width * handle -> height * band, handle -> width, handle -> height, GDT_Float32, 0, 0);
+	}
+
+	return data;
+}
+
+int clustering_init(void) {
+	return 1;
+}
+
+int clustering_close(void) {
+	if(clusters.gmm)
+		vl_gmm_delete(clusters.gmm);
+	return 1;
+}
+
+int clustering_perform(double *data, int size, int dimension, int from, int to) {
+	int index;
+	double loglikelihood;
+	VlGMM *gmm;
+
+	if(from > to) {
+		fprintf(stderr, "Cannot perform clustering.\n");
+		return 0;
+	}
+
+	for(index = from;index <= to;index++) {
+		vl_set_num_threads(1);
+		gmm = vl_gmm_new(VL_TYPE_DOUBLE, dimension, index);
+		vl_gmm_set_max_num_iterations(gmm, MAX_ITERATION);
+		vl_gmm_set_num_repetitions(gmm, 3);
+		//vl_gmm_set_verbosity(gmm, 1);
+		vl_gmm_set_initialization(gmm, VlGMMRand);
+		vl_gmm_cluster(gmm, data, size);
+		loglikelihood = vl_gmm_get_loglikelihood(gmm);
+
+		if(index == from) {
+			clusters.loglikelihood = loglikelihood;
+			clusters.gmm = gmm;
+			clusters.G = index;
+			continue;
+		}
+
+		if(loglikelihood > clusters.loglikelihood) {
+			clusters.loglikelihood = loglikelihood;
+			if(!clusters.gmm)
+				vl_gmm_delete(clusters.gmm);
+
+			clusters.gmm = gmm;
+			clusters.G = index;
+		}
+		else {
+			vl_gmm_delete(gmm);
+		}
+	}
+	printf("G: %d L: %f\n", clusters.G, clusters.loglikelihood);
+
+	return 1;
+}
+
+image_handle *open_image(char *path) {
+	GDALDatasetH dataset;
+	image_handle *handle = NULL;
+
+	dataset = GDALOpen(path, GA_ReadOnly);
+	if(!dataset) {
+		fprintf(stderr, "Cannot load image dataset.\n");
+		return dataset;
+	}
+
+	handle = (image_handle *)malloc(sizeof(image_handle));
+	if(!handle) {
+		fprintf(stderr, "Cannot allocate memory for image handle.\n");
+		return handle;
+	}
+
+	handle -> width = GDALGetRasterXSize(dataset);
+	handle -> height = GDALGetRasterYSize(dataset);
+	handle -> band = GDALGetRasterCount(dataset);
+	handle -> dataset = dataset;
+
+	return handle;
+}
+
+int unload_image(image_handle *handle) {
+	if(!handle) {
+		fprintf(stderr, "Cannot deallocate memory for image.\n");
+		return 0;
+	}
+
+	GDALClose(handle -> dataset);
+	free(handle);
+	return 1;
+}
+
+int save_clusters(double *klds, bounding_box *plan, int grid_size, image_handle *image1, image_handle *image2) {
+	const double *posteriors;
+	const double *means;
+	const double *sigmas;
+	int index, clust, max_index;
+	double max;
+	int i, j;
+	int percent = 10;
+	IplImage *cvImage1, *cvImage2, *resizedImage;
+	CvSize size;
+	unsigned char *cluster_map;
+	unsigned char *image = load_image(image2);
+
+
+	if(!klds || !clusters.gmm) {
+		fprintf(stderr, "Cannot store clustering result.\n");
+		return 0;
+	}
+
+	cluster_map = (unsigned char *)malloc(3 * image1 -> width * image2 -> height * sizeof(unsigned char));
+	memset(cluster_map, 0, 3 * image1 -> width * image2 -> height * sizeof(unsigned char));
+	posteriors = (double *)vl_gmm_get_posteriors(clusters.gmm);
+	means = (double *)vl_gmm_get_means(clusters.gmm);
+	sigmas = (double *)vl_gmm_get_covariances(clusters.gmm) ;
+	for(index = 0;index < clusters.G;index++) {
+		for(i = 0;i < vl_gmm_get_dimension(clusters.gmm);i++) {
+			printf("M: %f ", ((double *)means)[index * vl_gmm_get_dimension(clusters.gmm) + i]);
+		}
+		for(i = 0;i < vl_gmm_get_dimension(clusters.gmm);i++) {
+			printf("S: %f ", ((double *)sigmas)[index * vl_gmm_get_dimension(clusters.gmm) + i]);
+		}
+		printf("\n");
+	}
+
+	for(index = 0;index < grid_size;index++) {
+		unsigned char bgr[3];
+
+		max = posteriors[index * clusters.G];
+		max_index = 0;
+		for(clust = 1;clust < clusters.G;clust++) {
+			if(posteriors[index * clusters.G + clust] > max) {
+				max = posteriors[index * clusters.G + clust];
+				max_index = clust;
+			}
+		}
+
+		switch(max_index) {
+		case 0:
+			bgr[0] = 0x00;
+			bgr[1] = 0x00;
+			bgr[2] = 0xFF;
+			break;
+		case 1:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 2:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 3:
+			bgr[0] = 0x00;
+			bgr[1] = 0xFF;
+			bgr[2] = 0x00;
+			break;
+		case 4:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 5:
+			bgr[0] = 0xFF;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 6:
+			bgr[0] = 0x00;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		case 7:
+			bgr[0] = 0x00;
+			bgr[1] = 0x00;
+			bgr[2] = 0x00;
+			break;
+		}
+
+		for(i = 0;i < plan[index].height;i++) {
+			for(j = 0;j < plan[index].width;j++) {
+				memcpy(cluster_map + (i + plan[index].top) * image1 -> width * 3 + (plan[index].left + j) * 3, bgr, 3);
+			}
+		}
+	}
+
+	size.height = image1 -> height;
+	size.width = image1 -> width;
+	cvImage1 = cvCreateImage(size, 8, image2 -> band);
+	cvImage2 = cvCreateImage(size, 8, image2 -> band);
+	memcpy(cvImage1 -> imageData, image, image2 -> width * image2 -> height * image2 -> band);
+	memcpy(cvImage2 -> imageData, cluster_map, image2 -> width * image2 -> height * image2 -> band);
+
+	//cvAdd(cvImage1, cvImage2, cvImage1, NULL);
+	cvAddWeighted(cvImage1, 1.0, cvImage2, 0.4, 0, cvImage1);
+	resizedImage = cvCreateImage(cvSize((int)((cvImage1 -> width * percent) / 100) , (int)((cvImage1 -> height * percent) / 100) ), cvImage1 -> depth, cvImage1 -> nChannels);
+	cvResize(cvImage1, resizedImage, CV_INTER_LINEAR);
+	cvNamedWindow("Change Detection Result", 1);
+	cvShowImage("Change Detection Result", resizedImage);
+	cvWaitKey(0);
+	cvDestroyWindow("Change Detection Result");
+
+	cvReleaseImage(&cvImage1);
+	cvReleaseImage(&cvImage2);
+	cvReleaseImage(&resizedImage);
+
+	free(image);
+	free(cluster_map);
+	return 1;
+}
+
+void add_random_pixels(float *image1, float *image2, int band, int width, int height, float percentage) {
+	int image_size = width * height;
+	int pixels = (int)(image_size * percentage);
+	int i, j;
+
+	for(i = 0;i < pixels;i++) {
+		int random_position1 = rand() % image_size;
+		int random_position2 = rand() % image_size;
+
+		for(j = 0;j < band;j++) {
+			*(image1 + random_position1 + image_size * j) = (float)(rand() % 256);
+			*(image2 + random_position2 + image_size * j) = (float)(rand() % 256);
+		}
+	}
+}
+

@@ -1,0 +1,134 @@
+/*
+ * app.c
+ *
+ *  Created on: Feb 27, 2015
+ *  Author: Seokyong Hong
+ */
+
+#include "shong3/app.h"
+
+static _clusters clusters;
+
+static float *flatten(image_handle *handle) {
+	int band, index, length;
+	float *data;
+	//float temp[handle -> band][handle -> width * handle -> height];
+	float **temp;
+
+	if(!handle) {
+		fprintf(stderr, "Cannot flatten image.\n");
+		return NULL;
+	}
+	printf("%d\n", 5);
+	length = handle -> width * handle -> height * handle -> band * sizeof(float);
+	printf("%d\n", length);
+	data = vl_malloc(length);
+	if(!data) {
+		fprintf(stderr, "Cannot allocate memory for flattened image.\n");
+		return NULL;
+	}
+	printf("asdfsadf3452\n");
+	for(band = 0;band < handle -> band;band++) {
+		GDALRasterBandH p_band = GDALGetRasterBand(handle -> dataset, band + 1);
+		GDALRasterIO(p_band, GF_Read, 0, 0, handle -> width, handle -> height, temp[band], handle -> width * handle -> height, 1, GDT_Float32, 0, 0);
+	}
+
+	for(index = 0;index < handle -> width * handle -> height;index++) {
+		for(band = 0;band < handle -> band;band++) {
+			data[index * handle -> band * band] = temp[band][index];
+		}
+	}
+
+	return data;
+}
+
+int clustering_init(void) {
+	GDALAllRegister();
+
+	return 1;
+}
+
+int clustering_close(void) {
+	if(clusters.gmm)
+		vl_gmm_delete(clusters.gmm);
+	return 1;
+}
+
+int clustering_perform(image_handle *handle, int from, int to) {
+	int index;
+	float *data;
+	double loglikelihood;
+	VlGMM *gmm;
+
+	if(from > to) {
+		fprintf(stderr, "Cannot perform clustering.\n");
+		return 0;
+	}
+
+	data = flatten(handle);
+/*	for(index = from;index <= to;index++) {
+		gmm = vl_gmm_new(VL_TYPE_FLOAT, handle -> band, index);
+		vl_gmm_set_max_num_iterations(gmm, MAX_ITERATION);
+		vl_gmm_set_initialization(gmm, VlGMMRand);
+		vl_gmm_cluster(gmm, data, handle -> width * handle -> height);
+		loglikelihood = vl_gmm_get_loglikelihood(gmm);
+
+		if(index == from) {
+			clusters.loglikelihood = loglikelihood;
+			clusters.gmm = gmm;
+			clusters.G = index;
+			continue;
+		}
+
+		if(loglikelihood > clusters.loglikelihood) {
+			clusters.loglikelihood = loglikelihood;
+			if(!clusters.gmm)
+				vl_gmm_delete(clusters.gmm);
+
+			clusters.gmm = gmm;
+			clusters.G = index;
+		}
+		else {
+			vl_gmm_delete(gmm);
+		}
+	}
+	printf("G: %d L: %f\n", clusters.G, clusters.loglikelihood);
+	vl_free(data);
+*/
+	return 1;
+}
+
+image_handle *load_image(char *path) {
+	GDALDatasetH dataset;
+	image_handle *handle = NULL;
+
+	dataset = GDALOpen(path, GA_ReadOnly);
+	if(!dataset) {
+		fprintf(stderr, "Cannot load image dataset.\n");
+		return dataset;
+	}
+
+	handle = (void *)malloc(sizeof(image_handle));
+	if(!handle) {
+		fprintf(stderr, "Cannot allocate memory for image.\n");
+		return handle;
+	}
+
+	handle -> width = GDALGetRasterXSize(dataset);
+	handle -> height = GDALGetRasterYSize(dataset);
+	handle -> band = GDALGetRasterCount(dataset);
+	handle -> dataset = dataset;
+
+	return handle;
+}
+
+int unload_image(image_handle *handle) {
+	if(!handle) {
+		fprintf(stderr, "Cannot deallocate memory for image.\n");
+		return 0;
+	}
+
+	GDALClose(handle -> dataset);
+	free(handle);
+	return 1;
+}

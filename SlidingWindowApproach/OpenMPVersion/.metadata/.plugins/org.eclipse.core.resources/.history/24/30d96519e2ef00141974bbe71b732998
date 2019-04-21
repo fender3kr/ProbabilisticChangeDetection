@@ -1,0 +1,114 @@
+/*
+ * main.c
+ *
+ *  Created on: Feb 27, 2015
+ *  Author: Seokyong Hong
+ */
+
+#include <omp.h>
+#include <sys/time.h>
+#include "shong3/app.h"
+#include "shong3/KLD.h"
+#include "shong3/loader.h"
+#include "shong3/gaussian.h"
+
+#define IMAGE_T1_PATH		"/home/phantom/Desktop/images/ilk-3a-1024.tiff"
+#define IMAGE_T2_PATH		"/home/phantom/Desktop/images/ilk-3b-1024.tif"
+//#define IMAGE_T1_PATH		"/home/phantom/Desktop/EMClustering/Image/k02-05m.tif"
+//#define IMAGE_T2_PATH		"/home/phantom/Desktop/EMClustering/Image/k12-05m.tif"
+#define WINDOW_WIDTH		21
+#define WINDOW_HEIGHT		21
+#define MARGIN_LEFT			460
+#define MARGIN_RIGHT		394
+#define MARGIN_TOP			485
+#define MARGIN_BOTTOM		482
+#define NUMBER_OF_THREADS	8
+#define RANDOM_PIXELS		0.1F
+
+int main(int argc, char *argv[]) {
+	image_handle *image_t1, *image_t2;
+	int size, index;
+	double *klds;
+	float *grid_t1, *grid_t2;
+	p_gaussian gaussian_t1, gaussian_t2;
+	bounding_box window;
+	_clusters clusters;
+	struct timeval start, end;
+
+	gettimeofday(&start, NULL);
+	GDALAllRegister();
+	clustering_init();
+
+	image_t1 = open_image(IMAGE_T1_PATH);
+	image_t2 = open_image(IMAGE_T2_PATH);
+	if(!image_t1) {
+		fprintf(stderr, "The input image1 cannot be loaded.");
+		return 0;
+	}
+	if(!image_t2) {
+		fprintf(stderr, "The input image2 cannot be loaded.");
+		close_image(image_t1);
+		return 0;
+	}
+
+	size = compute_kld_size(image_t1 -> width, image_t1 -> height, MARGIN_TOP, MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_RIGHT);
+	if(size < 0) {
+		close_image(image_t1);
+		close_image(image_t2);
+		return 0;
+	}
+
+	klds = (double *)malloc(size * sizeof(double));
+	if(!klds) {
+		fprintf(stderr, "Cannot allocate memory for KLDs.\n");
+		close_image(image_t1);
+		close_image(image_t2);
+		return 0;
+	}
+
+	load_image(image_t1);
+	load_image(image_t2);
+
+	#pragma omp parallel for ordered schedule(dynamic, size / NUMBER_OF_THREADS) shared(stderr, size, image_t1, image_t2, klds) private(index, grid_t1, grid_t2, gaussian_t1, gaussian_t2, window) num_threads(NUMBER_OF_THREADS)
+	for(index = 0;index < size;index++) {
+		window.height = WINDOW_HEIGHT;
+		window.width = WINDOW_WIDTH;
+		window.left = index % (image_t1 -> width - MARGIN_LEFT - MARGIN_RIGHT) + MARGIN_LEFT - WINDOW_WIDTH / 2;
+		window.top = index / (image_t1 -> width - MARGIN_LEFT - MARGIN_RIGHT) + MARGIN_TOP - WINDOW_HEIGHT / 2;
+
+		//printf("Thread: %d out of %d processes Index: %d.\n", omp_get_thread_num(), omp_get_num_threads(), index);
+		grid_t1 = retrieve_grid(image_t1, window);
+		grid_t2 = retrieve_grid(image_t2, window);
+		gaussian_t1 = init_gaussian(image_t1 -> band);
+		gaussian_t2 = init_gaussian(image_t2 -> band);
+		compute_gaussian(gaussian_t1, grid_t1, window.width * window.height);
+		compute_gaussian(gaussian_t2, grid_t2, window.width * window.height);
+
+		klds[index] = compute_symmetric_kld(gaussian_t1, gaussian_t2);
+
+		while(isnan(klds[index])) {
+			fprintf(stderr, "Since KLD is NaN, it is recalculated.\n");
+			add_random_pixels(grid_t1, grid_t2, image_t1 -> band, window.width, window.height, RANDOM_PIXELS);
+			compute_gaussian(gaussian_t1, grid_t1, window.width * window.height);
+			compute_gaussian(gaussian_t2, grid_t2, window.width * window.height);
+			klds[index] = compute_symmetric_kld(gaussian_t1, gaussian_t2);
+		}
+
+		close_grid(grid_t1);
+		close_grid(grid_t2);
+		close_gaussian(gaussian_t1);
+		close_gaussian(gaussian_t2);
+	}
+
+	clustering_perform(&clusters, klds, size, 1, 4, 7);
+	printf("%ld\n", ((end.tv_sec * 1000000 + end.tv_usec) - (start.tv_sec * 1000000 + start.tv_usec)));
+	save_clusters(&clusters, klds, MARGIN_TOP, MARGIN_LEFT, MARGIN_BOTTOM, MARGIN_RIGHT, image_t1, image_t2);
+
+	clustering_close(&clusters);
+	close_image(image_t1);
+	close_image(image_t2);
+
+	return 0;
+}
+
+

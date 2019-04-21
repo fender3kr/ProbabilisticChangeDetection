@@ -1,0 +1,117 @@
+/*
+ * loader.c
+ *
+ *  Created on: Apr 23, 2015
+ *  Author: Seokyong Hong (shong3)
+ */
+
+#include "shong3/loader.h"
+
+image_handle *open_image(char *path) {
+	GDALDatasetH dataset;
+	image_handle *handle = NULL;
+
+	dataset = GDALOpen(path, GA_ReadOnly);
+	if(!dataset) {
+		fprintf(stderr, "Cannot load image dataset.\n");
+		return dataset;
+	}
+
+	handle = (image_handle *)malloc(sizeof(image_handle));
+	if(!handle) {
+		fprintf(stderr, "Cannot allocate memory for image handle.\n");
+		return handle;
+	}
+
+	handle -> width = GDALGetRasterXSize(dataset);
+	handle -> height = GDALGetRasterYSize(dataset);
+	handle -> band = GDALGetRasterCount(dataset);
+	handle -> dataset = dataset;
+
+	return handle;
+}
+
+int load_image(image_handle *h_image) {
+	int band;
+
+	if(!h_image) {
+		fprintf(stderr, "Image handle is NULL.\n");
+		return 0;
+	}
+
+	h_image -> image = (float *)malloc(h_image -> width * h_image -> height * h_image -> band * sizeof(float));
+	if(!h_image -> image) {
+		fprintf(stderr, "Cannot allocate memory for flattened image.\n");
+		return 0;
+	}
+
+	for(band = 0;band < h_image -> band;band++) {
+		GDALRasterBandH p_band = GDALGetRasterBand(h_image -> dataset, band + 1);
+		GDALRasterIO(p_band, GF_Read, 0, 0, h_image -> width, h_image -> height, h_image -> image + h_image -> width * h_image -> height * band, h_image -> width, h_image -> height, GDT_Float32, 0, 0);
+	}
+
+	return 1;
+}
+
+float *retrieve_grid(image_handle *h_image, bounding_box box) {
+	int index, band;
+	float *grid;
+
+	if(!h_image) {
+		fprintf(stderr, "Image handle is NULL.\n");
+		return NULL;
+	}
+
+	if(!h_image -> image) {
+		fprintf(stderr, "Image is NULL.\n");
+		return NULL;
+	}
+
+	grid = (float *)malloc(box.width * box.height * h_image -> band * sizeof(float));
+	if(!grid) {
+		fprintf(stderr, "Memory for grid cannot be allocated.\n");
+		return NULL;
+	}
+
+	for(band = 0;band < h_image -> band;band++) {
+		for(index = 0;index < box.height;index++) {
+			memcpy(grid + index * box.width + band * box.width * box.height, h_image -> image + box.left + (box.top + index) * h_image -> width + band * (h_image -> width * h_image -> height), box.width * sizeof(float));
+		}
+	}
+
+	return grid;
+}
+
+void close_grid(float *grid) {
+	if(grid)
+		free(grid);
+}
+
+int close_image(image_handle *h_image) {
+	if(!h_image) {
+		fprintf(stderr, "Cannot deallocate memory for image.\n");
+		return 0;
+	}
+
+	if(h_image -> image)
+		free(h_image -> image);
+
+	GDALClose(h_image -> dataset);
+	free(h_image);
+
+	return 1;
+}
+
+unsigned char *return_display_image(image_handle *h_image) {
+	unsigned char *image;
+	int band, x;
+
+	image = (unsigned char *)malloc(h_image -> width * h_image -> height * h_image -> band);
+	for(x = 0;x < h_image -> width * h_image -> height;x++) {
+		for(band = 0;band < h_image -> band;band++) {
+			*(image + x * h_image -> band + h_image -> band - 1 - band) = (unsigned char)(*(h_image ->image + band * (h_image -> width * h_image -> height) + x));
+		}
+	}
+
+	return image;
+}
